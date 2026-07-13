@@ -227,10 +227,14 @@ hasSharedMemory()                // boolean — SharedArrayBuffer usable right n
 
 ## `WorkerEnv` — the injected last argument
 
-Every function shipped via `runInThread` or `Task.spawn` receives one extra argument after the
-ones you pass: a `WorkerEnv`. **`Task.spawnService` methods are the one exception** — they are
-invoked as plain methods (`task.call(name, args)`) with no env appended, so reach for
-`globalThis.__unithread` inside a service method instead (see the note under `env.emit` below).
+Every function shipped via `runInThread`, `Task.spawn`, **or `WorkerPool.create`** receives one
+extra argument after the ones you pass: a `WorkerEnv`. Pool functions are not special here — the
+pool ships them through `Task.spawn` and the same "call" protocol, so `(n, env) => …` works in a
+pool exactly as it does in a task.
+
+**`Task.spawnService` methods are the one exception** — they are invoked as plain methods
+(`task.call(name, args)`) with no env appended, so reach for `globalThis.__unithread` inside a
+service method instead (see the note under `env.emit` below).
 
 ```ts
 interface WorkerEnv {
