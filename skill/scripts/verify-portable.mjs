@@ -27,12 +27,48 @@
 // with `{ compare: false }` (or `--no-compare` on the CLI) — this restores
 // the older, weaker "did it throw?" check and also means the candidate only
 // runs once, in the worker.
+//
+// IMPORTANT — a function that mutates its input in place and returns nothing
+// is the headline use case for this skill (pixel/matrix loops, transferables,
+// SharedArrayBuffer) and it is exactly the case a return-value comparison
+// cannot see: both sides return `undefined`, so `undefined === undefined`
+// "passes" while proving nothing about whether the mutation itself was
+// correct on the worker side. So when BOTH sides return `undefined`, this
+// gate refuses to call that a pass — it reports `reason: "vacuous"` instead.
+// Give the candidate something checkable to return (even just for this
+// check), or re-run with `--no-compare` if you knowingly accept that the
+// comparison cannot help you here.
+//
+// The worker side always receives a trailing WorkerEnv (see src/spawn.ts —
+// the "call" protocol path appends `env` after the shipped args). A
+// documented `(n, env) => …` signature (blessed for runInThread, Task.spawn,
+// and WorkerPool in references/api.md) must see that same shape on the main
+// thread, or this gate reports a capture that does not exist. So the
+// main-thread invocation is given a stub WorkerEnv as its trailing argument
+// too — same arity, same shape, both sides.
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { Task } from "../assets/unithread.bundle.js";
 
 const NOT_DEFINED = /\b(\w+) is not defined\b/;
+
+// Mirrors the shape the worker bootstrap builds in src/spawn.ts (`_bootstrap`)
+// closely enough for comparison purposes: same fields, inert no-op methods.
+// `isMainThread: true` / `threadId: 0` / `runtime: "main"` are deliberately
+// NOT what the worker side sees (`false` / a real thread id / "node"|"web") —
+// a candidate that branches on those fields is making a real, observable
+// decision based on which side it's running on, and this stub does not try
+// to hide that from the comparison.
+const STUB_MAIN_ENV = Object.freeze({
+  isMainThread: true,
+  threadId: 0,
+  runtime: "main",
+  emit() {},
+  transfer(v) {
+    return v;
+  },
+});
 
 /**
  * @param {Function} fn   candidate to ship to a worker
@@ -47,7 +83,7 @@ const NOT_DEFINED = /\b(\w+) is not defined\b/;
  *   value?: unknown,
  *   mainValue?: unknown,
  *   leaked: string|null,
- *   reason: "captured"|"diverged"|"threw"|null,
+ *   reason: "captured"|"diverged"|"vacuous"|"threw"|null,
  *   error: string|null,
  * }>}
  */
@@ -86,12 +122,15 @@ export async function verifyPortable(fn, args = [], { compare = true } = {}) {
   }
 
   // Run the same candidate, with the same args, on the main thread — this is
-  // the second execution documented in the file header.
+  // the second execution documented in the file header. Append the same
+  // trailing WorkerEnv shape the worker side receives (src/spawn.ts's "call"
+  // path), so a documented `(n, env) => …` signature gets the same arity on
+  // both sides instead of a false "captured" report.
   let mainOk;
   let mainValue;
   let mainErr;
   try {
-    mainValue = await fn(...args);
+    mainValue = await fn(...args, STUB_MAIN_ENV);
     mainOk = true;
   } catch (err) {
     mainOk = false;
@@ -105,6 +144,24 @@ export async function verifyPortable(fn, args = [], { compare = true } = {}) {
     // side, the one that matters for shipping, actually ran fine).
     const message = mainErr?.message ?? String(mainErr);
     return { ok: false, value: workerValue, leaked: null, reason: "diverged", error: message };
+  }
+
+  if (mainValue === undefined && workerValue === undefined) {
+    // Both sides returned nothing. `undefined === undefined` would otherwise
+    // sail through the equality check below and report `ok: true` — exactly
+    // the bug this gate exists to catch for in-place mutation, transferables,
+    // and SharedArrayBuffer workloads, none of which need a return value to
+    // do real (and possibly wrong) work. A comparison of two "nothing"s has
+    // proved nothing, so this is neither a pass nor a "diverged" failure —
+    // it's its own reason so the message can say what actually happened.
+    return {
+      ok: false,
+      value: workerValue,
+      mainValue,
+      leaked: null,
+      reason: "vacuous",
+      error: null,
+    };
   }
 
   if (!isDeepStrictEqual(mainValue, workerValue)) {
@@ -127,12 +184,22 @@ Gate 1: proves a candidate function survives being shipped to a worker
 thread AND computes the same result there as it does on the main thread.
 
 By default the candidate runs TWICE — once on the main thread, once in the
-worker — and the results are deep-compared. If your candidate has side
-effects, both executions happen for real. If your candidate is
-non-deterministic (Math.random, Date.now, etc.), the two runs will
-legitimately differ and this gate will report a false "diverged" failure;
-pass --no-compare to skip the comparison (candidate then runs once, in the
-worker, and this only checks "did it throw?").
+worker — and the results are deep-compared. Both sides also receive the same
+trailing WorkerEnv the worker protocol injects, so a documented
+"(n, env) => ..." signature compares correctly instead of reporting a false
+capture. If your candidate has side effects, both executions happen for
+real. If your candidate is non-deterministic (Math.random, Date.now, etc.),
+the two runs will legitimately differ and this gate will report a false
+"diverged" failure. If your candidate returns nothing on both sides (e.g. it
+only mutates its input in place), the comparison has proved nothing and this
+gate reports "vacuous" rather than a pass.
+
+--no-compare skips the comparison entirely: the candidate then runs ONCE, in
+the worker only, and this only checks "did it throw?" — it is honest about
+what it does NOT check: a --no-compare pass says nothing about whether the
+worker computed the right answer, only that it ran without erroring. Use it
+for non-deterministic candidates, or for vacuous (nothing-returning)
+candidates you knowingly accept the risk on.
 `;
 
 // CLI: node verify-portable.mjs [--no-compare] path/to/mod.mjs#exportName '[10]'
@@ -172,6 +239,13 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     console.error(`      \`typeof x !== "undefined"\`). If this candidate is intentionally`);
     console.error(`      non-deterministic (Math.random, Date.now, ...), rerun with --no-compare.`);
     if (r.error) console.error(`      main-thread error: ${r.error}`);
+  } else if (r.reason === "vacuous") {
+    console.error(`FAIL  not verified — the function returns nothing on either side.`);
+    console.error(`      Comparing "undefined" to "undefined" proves nothing about whether the`);
+    console.error(`      worker computed the right thing (this is the common shape for in-place`);
+    console.error(`      mutation, transferables, or SharedArrayBuffer workloads). Either have the`);
+    console.error(`      function return something checkable, or re-run with --no-compare if you`);
+    console.error(`      knowingly accept that this cannot be verified by comparison.`);
   } else {
     console.error(`FAIL  the candidate threw its own error — not a boundary problem: ${r.error}`);
   }

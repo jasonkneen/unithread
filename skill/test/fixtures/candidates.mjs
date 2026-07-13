@@ -2,6 +2,7 @@
 // look fine and are not.
 const MULTIPLIER = 3; // captured from module scope — invisible across the boundary
 const MULT = 7; // same trap, but guarded — see `sneaky` below
+const K = 5; // same trap again, but hidden behind an in-place mutation that returns nothing
 
 /** Self-contained: everything it needs arrives as an argument. */
 export const portable = (n) => {
@@ -46,3 +47,19 @@ export const throwsOwnError = (n) => {
  * is for.
  */
 export const nonDeterministic = () => Math.random();
+
+/**
+ * Captures K, exactly like `sneaky` above, but never returns a value to
+ * compare — it mutates its argument in place instead (the headline use case
+ * for this skill: pixel/matrix loops, transferables, SharedArrayBuffer). Both
+ * sides return `undefined`, so a comparison of return values alone cannot
+ * see that the main thread wrote 5 into arr[0] while the worker — where K
+ * does not exist — silently wrote 0. This must be reported as `"vacuous"`,
+ * never `ok: true`.
+ */
+export const mutatesInPlace = (arr) => {
+  arr[0] = typeof K !== "undefined" ? K : 0;
+};
+
+/** Self-contained, and demonstrates the documented trailing WorkerEnv. */
+export const usesWorkerEnv = (n, env) => n + (env ? 1 : 0);

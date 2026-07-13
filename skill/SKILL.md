@@ -57,10 +57,14 @@ Record the metric before changing anything.
 
       node <skill>/scripts/measure.mjs path/to/mod.mjs#exportName '[args]'
 
-- **Browser**: `--browser <url> --action "<js>" --seconds N`. Leads with `worstFrameMs` and
-  `jankFrames` (count and % of frames over the 16.7 ms budget) — those are the honest gate.
-  `fps` is printed last for reference only: headless Chromium is **not vsync-capped**, a smooth
-  run can read ~120 fps, and it must never be compared against 60.
+- **Browser**: `--browser <url> --action "<js>" --seconds N`. Also prints `idleWorstFrameMs` — a
+  frame-time baseline sampled on a blank page **before** navigating anywhere near `url`, so it
+  reflects whether the *browser/machine* is busy, not whether the page under test starts working
+  immediately on load. If that floor is over 30 ms it **refuses to run** (non-zero exit), same
+  posture as Node mode. Gate on `jankFrames`/`jankPct` (count and % of frames over the 16.7 ms
+  budget) — a clean 0%-vs-~98% split — not on `worstFrameMs`, which can sit close to the noise
+  floor. `fps` is printed last for reference only: headless Chromium is **not vsync-capped**, a
+  smooth run can read ~120 fps, and it must never be compared against 60.
 
       node <skill>/scripts/measure.mjs --browser http://localhost:8080/ --action "startWork()" --seconds 4
 
@@ -95,15 +99,27 @@ with the same args, and deep-compares the two results — it does not merely ask
 
     node <skill>/scripts/verify-portable.mjs path/to/mod.mjs#exportName '[args]'
 
+Both invocations receive the same trailing `WorkerEnv` the worker protocol injects (see
+`references/api.md`), so a documented `(n, env) => …` signature compares correctly instead of
+reporting a capture that doesn't exist.
+
 The result carries a `reason`:
 - `captured` — a real `ReferenceError`; the leaked identifier is named in the output.
 - `diverged` — no error, but the two sides computed **different answers**. This is the case a
   throw-only check would miss entirely: `typeof MULT !== "undefined" ? n * MULT : n` doesn't
   throw in the worker, it just silently takes the other branch and returns the wrong number.
+- `vacuous` — **both sides returned `undefined`.** A comparison of two "nothing"s proves nothing.
+  This is the common shape for the skill's headline use case — in-place mutation of pixel/matrix
+  buffers, transferables, `SharedArrayBuffer` — where a capture can silently corrupt the mutation
+  itself while the return value stays `undefined` on both sides. Never reported as a pass. Give
+  the function something checkable to return, or use `--no-compare` if you knowingly accept that
+  the comparison cannot help you here.
 - `threw` — the candidate raised its own error (not a leaked identifier); that's the candidate's
   business, not a boundary problem.
 
 Fails with `captured` or `diverged` → fix the identified capture, pass it as an argument, re-run.
+Fails with `vacuous` → the gate could not verify anything either way; make the function return a
+checkable value, or accept the risk explicitly with `--no-compare`.
 
 Consequences, stated honestly:
 - **The candidate runs twice** (once per side). A function with side effects — writes a file,
@@ -113,6 +129,11 @@ Consequences, stated honestly:
   different results and get reported as `diverged` even though it's perfectly portable. That's a
   false alarm, not a bug in the candidate. Use `--no-compare` for these — it drops back to the
   "did it throw?" check and the candidate runs once, in the worker only.
+- **`--no-compare` is honest about what it gives up.** It skips the comparison entirely — no
+  `vacuous`, no `diverged`, no `captured`-via-divergence. A `--no-compare` pass means only "it ran
+  without throwing", nothing about whether the worker computed the right answer. Reach for it
+  deliberately (non-deterministic candidates, or a nothing-returning candidate you accept the risk
+  on), not as a way to make a `vacuous` or `diverged` failure go away.
 - **Residual limitation:** the gate only exercises the code path your sample args take. A capture
   on a branch the args never reach can still slip through. Sample args must exercise the path
   under test.

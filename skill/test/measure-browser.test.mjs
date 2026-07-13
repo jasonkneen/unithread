@@ -12,13 +12,22 @@ before(async () => {
 });
 after(() => server?.kill());
 
+// IMPORTANT 4 / MINOR 5: gate on `jankFrames`/`jankPct`, not `worstFrameMs` or
+// `fps`. A single worst-frame reading sits close to the noise floor (this
+// suite has been observed to report 67ms then 50ms against a `< 50` threshold
+// on an idle machine — a flaky gate), while the jank *percentage* separates
+// cleanly: ~98% of frames over budget on the main thread vs. ~0% on workers.
+// `fps` is excluded entirely per SKILL.md and this file's own header comment:
+// headless Chromium is not vsync-capped, so it must never be compared to 60.
 test("main-thread workload is seen as jank", async () => {
   const r = await measureFrames(URL_, {
     action: "document.getElementById('btnMain').click()",
     seconds: 4,
   });
-  assert.ok(r.worstFrameMs > 60, `expected jank, got ${r.worstFrameMs}ms worst frame`);
-  assert.ok(r.fps < 40, `expected low fps, got ${r.fps}`);
+  assert.ok(
+    r.jankPct > 80,
+    `expected heavy jank, got ${r.jankPct}% (${r.jankFrames}/${r.totalFrames}, worst=${r.worstFrameMs}ms)`,
+  );
 });
 
 test("worker workload is seen as smooth", async () => {
@@ -26,6 +35,8 @@ test("worker workload is seen as smooth", async () => {
     action: "document.getElementById('btnWorker').click()",
     seconds: 4,
   });
-  assert.ok(r.worstFrameMs < 50, `expected smooth, got ${r.worstFrameMs}ms worst frame`);
-  assert.ok(r.fps > 45, `expected high fps, got ${r.fps}`);
+  assert.ok(
+    r.jankPct < 10,
+    `expected minimal jank, got ${r.jankPct}% (${r.jankFrames}/${r.totalFrames}, worst=${r.worstFrameMs}ms)`,
+  );
 });
