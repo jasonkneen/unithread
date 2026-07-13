@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>unithread — main thread vs worker threads</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #0c0d10; color: #e6e7eb;
+         font: 14px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  main { max-width: 820px; margin: 0 auto; padding: 40px 24px 96px; }
+  h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
+  .sub { color: #8b8e98; margin: 0 0 24px; }
+
+  /* The switch — the whole demo is this one control. */
+  .switch { display: flex; gap: 0; border: 1px solid #2a2c33; border-radius: 8px;
+            overflow: hidden; margin-bottom: 20px; }
+  .switch button { flex: 1; background: #111217; color: #8b8e98; border: 0;
+                   border-right: 1px solid #2a2c33; padding: 16px 12px; font: inherit;
+                   font-size: 15px; cursor: pointer; transition: background .12s, color .12s; }
+  .switch button:last-child { border-right: 0; }
+  .switch button:hover { background: #16181e; color: #e6e7eb; }
+  .switch button.on   { background: #2a1416; color: #f87171; font-weight: 600; }
+  .switch button.on.good { background: #10241a; color: #4ade80; }
+
+  .stage { border: 1px solid #17181d; border-radius: 10px; background: #0f1015;
+           padding: 20px; margin-bottom: 14px; }
+
+  /* Driven by requestAnimationFrame on the MAIN thread. A CSS animation would keep
+     running on the compositor while the main thread is blocked — it would hide the
+     jank and make this demo lie. */
+  .track { height: 14px; background: #17181d; border-radius: 999px; margin-bottom: 18px; }
+  .bead  { width: 70px; height: 14px; border-radius: 999px; background: #4ade80; }
+  .bead.janky { background: #f87171; }
+
+  canvas { width: 100%; height: 70px; display: block; }
+  .tracelabel { display: flex; justify-content: space-between; color: #5c5f6a;
+                font-size: 12px; margin-top: 6px; }
+
+  .gauges { display: flex; gap: 32px; margin-top: 18px; }
+  .gauge b { display: block; font-size: 28px; line-height: 1.2; color: #e6e7eb; }
+  .gauge span { color: #8b8e98; font-size: 12px; }
+  .gauge.bad b { color: #f87171; }
+  .gauge.good b { color: #4ade80; }
+
+  .verdictline { font-size: 15px; font-weight: 600; margin-bottom: 28px; min-height: 24px; }
+
+  details { border-top: 1px solid #17181d; padding-top: 20px; margin-top: 36px; }
+  summary { cursor: pointer; color: #8b8e98; font-size: 13px; text-transform: uppercase;
+            letter-spacing: .08em; }
+  #log { margin-top: 14px; }
+  #log div { padding: 3px 0; border-bottom: 1px solid #17181d; }
+  .pass::before { content: "PASS  "; color: #4ade80; }
+  .fail::before { content: "FAIL  "; color: #f87171; }
+  .skip::before { content: "SKIP  "; color: #fbbf24; }
+  #verdict { margin-top: 14px; font-weight: 600; }
+  .env { color: #5c5f6a; font-size: 12px; margin-top: 28px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>unithread</h1>
+  <p class="sub">Same heavy workload, running non-stop. The only thing that changes is which thread it runs on.</p>
+
+  <div class="switch">
+    <button id="btnMain" class="on">▶ work on MAIN thread</button>
+    <button id="btnWorker">▶ work on WORKER threads</button>
+    <button id="btnOff">■ stop</button>
+  </div>
+
+  <div class="verdictline" id="verdictline"></div>
+
+  <div class="stage">
+    <div class="track"><div class="bead" id="bead"></div></div>
+    <canvas id="trace"></canvas>
+    <div class="tracelabel">
+      <span>frame times — each bar is one frame, red = missed the 16.7 ms budget</span>
+      <span id="tracehint"></span>
+    </div>
+    <div class="gauges">
+      <div class="gauge" id="gFps"><b id="fps">—</b><span>fps</span></div>
+      <div class="gauge" id="gJank"><b id="jank">—</b><span>worst frame</span></div>
+      <div class="gauge" id="gRate"><b id="rate">—</b><span>jobs/sec</span></div>
+    </div>
+  </div>
+
+  <details>
+    <summary>proof suite (browser)</summary>
+    <div id="log"></div>
+    <div id="verdict"></div>
+  </details>
+
+  <div class="env" id="env"></div>
+</main>
+
+<script type="module">
+import {
+  Task, runInThread, WorkerPool, spawnRemote,
+  SharedCounter, Mutex, Signal,
+  hasSharedMemory, hardwareConcurrency, isNode,
+} from "../dist/unithread.bundle.js";
+
+const cores = await hardwareConcurrency();
+const POOL = Math.max(2, Math.min(4, cores - 1));
+// One job ≈ 110 ms of solid CPU — about 6 frames' worth. Measured, not guessed:
+// fib(31)=25ms is too cheap (the main thread yields between jobs and still holds
+// ~60fps, so the demo shows nothing). fib(34) cannot be hidden.
+const WORK = 34;
+
+document.getElementById("env").textContent =
+  `runtime=${isNode ? "node" : "browser"} · cores=${cores} · pool=${POOL} · ` +
+  `crossOriginIsolated=${self.crossOriginIsolated} · SharedArrayBuffer=${hasSharedMemory() ? "on" : "off"}`;
+
+// Shipped to the workers via toString() — captures nothing from this scope.
+const JOB = (n) => {
+  const fib = (x) => (x < 2 ? x : fib(x - 1) + fib(x - 2));
+  return fib(n);
+};
+
+/* ---------------- the animation + frame trace (main thread) ---------------- */
+const bead = document.getElementById("bead");
+const cv = document.getElementById("trace");
+const ctx = cv.getContext("2d");
+const fpsEl = document.getElementById("fps");
+const jankEl = document.getElementById("jank");
+const rateEl = document.getElementById("rate");
+const gFps = document.getElementById("gFps");
+const gJank = document.getElementById("gJank");
+const gRate = document.getElementById("gRate");
+const hint = document.getElementById("tracehint");
+const verdictline = document.getElementById("verdictline");
+
+const CAP = 160;
+const frames = [];
+let dpr = 1;
+function sizeCanvas() {
+  dpr = window.devicePixelRatio || 1;
+  cv.width = cv.clientWidth * dpr;
+  cv.height = 70 * dpr;
+}
+sizeCanvas();
+addEventListener("resize", sizeCanvas);
+
+function drawTrace() {
+  const w = cv.width, h = cv.height;
+  ctx.clearRect(0, 0, w, h);
+  // 16.7 ms budget line
+  const budgetY = h - (16.7 / 60) * h;
+  ctx.fillStyle = "#2a2c33";
+  ctx.fillRect(0, budgetY, w, 1 * dpr);
+  const bw = w / CAP;
+  for (let i = 0; i < frames.length; i++) {
+    const dt = frames[i];
+    const bh = Math.max(1 * dpr, Math.min(h, (dt / 60) * h));
+    ctx.fillStyle = dt > 20 ? "#f87171" : "#4ade80";
+    ctx.fillRect(i * bw, h - bh, Math.max(1, bw - 1 * dpr), bh);
+  }
+}
+
+let last = performance.now(), fcount = 0, worst = 0;
+requestAnimationFrame(function loop(t) {
+  const dt = t - last;
+  last = t;
+  fcount++;
+  if (dt > worst) worst = dt;
+  frames.push(dt);
+  if (frames.length > CAP) frames.shift();
+  drawTrace();
+  const span = bead.parentElement.clientWidth - bead.clientWidth;
+  bead.style.transform = `translateX(${Math.abs(((t / 10) % (span * 2)) - span)}px)`;
+  requestAnimationFrame(loop);
+});
+
+/* ---------------- the workload ---------------- */
+let mode = "main";           // "main" | "worker" | "off"
+let jobs = 0;
+let pool = null;
+
+const sleep0 = () => new Promise((r) => setTimeout(r, 0));
+
+async function mainPump() {
+  while (mode === "main") {
+    JOB(WORK);               // ← on the main thread. Every job is a dropped frame.
+    jobs++;
+    await sleep0();          // yield, so the page even gets a chance to paint
+  }
+}
+
+async function workerPump() {
+  pool ??= await WorkerPool.create(JOB, POOL);
+  // Two jobs in flight per worker, not one: with exactly one, a worker sits idle
+  // during the result round-trip back through the main thread. Measured: ~8.4
+  // jobs/sec at depth 1 vs ~12.4 at depth 2 on this machine.
+  await Promise.all(Array.from({ length: POOL * 2 }, async () => {
+    while (mode === "worker") {
+      await pool.exec([WORK]); // ← on real OS threads. Main thread just awaits.
+      jobs++;
+    }
+  }));
+}
+
+function setMode(next) {
+  mode = next;
+  jobs = 0; worst = 0; frames.length = 0;
+  btnMain.classList.toggle("on", next === "main");
+  btnWorker.classList.toggle("on", next === "worker");
+  btnWorker.classList.toggle("good", next === "worker");
+  btnOff.classList.toggle("on", next === "off");
+  btnOff.classList.toggle("good", next === "off");
+  bead.classList.toggle("janky", next === "main");
+  hint.textContent = next === "main" ? "main thread" : next === "worker" ? `${POOL} worker threads` : "idle";
+  verdictline.textContent = "";
+  if (next === "main") mainPump();
+  if (next === "worker") workerPump();
+}
+
+const btnMain = document.getElementById("btnMain");
+const btnWorker = document.getElementById("btnWorker");
+const btnOff = document.getElementById("btnOff");
+btnMain.onclick = () => setMode("main");
+btnWorker.onclick = () => setMode("worker");
+btnOff.onclick = () => setMode("off");
+
+// Gauges, once a second.
+let baselineRate = 0;
+setInterval(() => {
+  const fps = fcount; fcount = 0;
+  const rate = jobs; jobs = 0;
+  const w = Math.round(worst); worst = 0;
+  fpsEl.textContent = mode === "off" ? fps : fps;
+  jankEl.textContent = `${w} ms`;
+  rateEl.textContent = mode === "off" ? "—" : rate;
+  const bad = w > 20;
+  gFps.classList.toggle("bad", bad); gFps.classList.toggle("good", !bad && mode !== "off");
+  gJank.classList.toggle("bad", bad); gJank.classList.toggle("good", !bad && mode !== "off");
+  gRate.classList.toggle("good", mode === "worker");
+
+  // Baseline = the main thread's BEST second, not its last: a noisy second would
+  // otherwise flatter the workers. Throughput is machine-dependent; smoothness is
+  // the claim that always holds, so lead with it and let the rate speak for itself.
+  if (mode === "main" && rate > baselineRate) baselineRate = rate;
+  if (mode === "main") {
+    verdictline.style.color = "#f87171";
+    verdictline.textContent =
+      `work is on the MAIN thread → the page is stuttering: ${fps} fps, ${w} ms worst frame (a frame is 16.7 ms)`;
+  } else if (mode === "worker") {
+    verdictline.style.color = "#4ade80";
+    const vs = baselineRate ? `, ${rate} vs ${baselineRate} jobs/sec` : "";
+    verdictline.textContent =
+      `work is on ${POOL} WORKER threads → the page is smooth: ${fps} fps, ${w} ms worst frame${vs}`;
+  }
+}, 1000);
+
+setMode("main"); // land on the bad case, so one click shows the difference
+
+/* ---------------- proof suite (collapsed) ---------------- */
+const log = document.getElementById("log");
+const verdict = document.getElementById("verdict");
+let pass = 0, fail = 0, results = [];
+const assert = (name, cond, detail = "") => {
+  results.push(`${cond ? "PASS" : "FAIL"}  ${name}${detail ? "  — " + detail : ""}`);
+  const d = document.createElement("div");
+  d.className = cond ? "pass" : "fail";
+  d.textContent = name + (detail ? "  — " + detail : "");
+  log.appendChild(d);
+  cond ? pass++ : fail++;
+};
+const skip = (name, why) => {
+  results.push(`SKIP  ${name} — ${why}`);
+  const d = document.createElement("div");
+  d.className = "skip";
+  d.textContent = `${name}  — ${why}`;
+  log.appendChild(d);
+};
+
+async function runProofs() {
+  try {
+    const env = await runInThread((e) => e);
+    assert("worker runtime is web, off main thread",
+      env.runtime === "web" && env.isMainThread === false, JSON.stringify(env));
+
+    let ticks = 0;
+    const iv = setInterval(() => ticks++, 10);
+    await runInThread((ms) => { const end = Date.now() + ms; while (Date.now() < end) {} return 1; }, 400);
+    clearInterval(iv);
+    assert("main thread responsive during 400ms worker burn", ticks >= 10, `${ticks} ticks`);
+
+    const p = await WorkerPool.create((n) => {
+      const fib = (x) => (x < 2 ? x : fib(x - 1) + fib(x - 2));
+      return fib(n);
+    }, 4);
+    const mapped = await p.map([20, 22, 24, 26], (n) => [n]);
+    await p.close();
+    assert("pool.map correct & ordered",
+      JSON.stringify(mapped) === "[6765,17711,46368,121393]", JSON.stringify(mapped));
+
+    const svc = await spawnRemote({
+      pow: (a, b) => Math.pow(a, b),
+      boom: () => { throw new Error("kaboom"); },
+    });
+    assert("proxy method call", (await svc.pow(2, 10)) === 1024);
+    let msg = "";
+    try { await svc.boom(); } catch (e) { msg = e.message; }
+    assert("worker error propagates through proxy", msg === "kaboom", msg);
+    await svc.terminate();
+
+    const streamer = await Task.spawn((n, env) => {
+      for (let i = 1; i <= n; i++) env.emit("p", i);
+      return "done";
+    });
+    const events = [];
+    streamer.onEvent((_, d) => events.push(d));
+    const streamed = await streamer.run([5]);
+    await streamer.terminate();
+    assert("streamed events arrive in order",
+      JSON.stringify(events) === "[1,2,3,4,5]" && streamed === "done", JSON.stringify(events));
+
+    const buf = new ArrayBuffer(4096);
+    const mover = await Task.spawn((b) => b.byteLength);
+    const seen = await mover.run([buf], [buf]);
+    await mover.terminate();
+    assert("ArrayBuffer moved, not copied (source detached)",
+      seen === 4096 && buf.byteLength === 0, `worker=${seen} source=${buf.byteLength}`);
+
+    assert("crossOriginIsolated (COOP/COEP served)",
+      self.crossOriginIsolated === true, String(self.crossOriginIsolated));
+
+    if (hasSharedMemory()) {
+      const counter = new SharedCounter(0);
+      const adders = await Promise.all([1, 2, 3, 4].map(() =>
+        Task.spawn((sab, n) => {
+          const v = new Int32Array(sab);
+          for (let i = 0; i < n; i++) Atomics.add(v, 0, 1);
+          return 1;
+        })));
+      await Promise.all(adders.map((w) => w.run([counter.buffer, 25000])));
+      await Promise.all(adders.map((w) => w.terminate()));
+      assert("atomic counter exact across 4 threads",
+        counter.value === 100000, `${counter.value} === 100000`);
+
+      const mutex = new Mutex();
+      const data = new SharedArrayBuffer(4);
+      const lockers = await Promise.all([1, 2, 3, 4].map(() =>
+        Task.spawn((lockBuf, dataBuf, n) => {
+          const lock = new Int32Array(lockBuf), view = new Int32Array(dataBuf);
+          for (let i = 0; i < n; i++) {
+            for (;;) {
+              if (Atomics.compareExchange(lock, 0, 0, 1) === 0) break;
+              Atomics.wait(lock, 0, 1);          // legal: worker thread, not main
+            }
+            const v = view[0]; view[0] = v + 1;  // non-atomic on purpose
+            Atomics.store(lock, 0, 0); Atomics.notify(lock, 0, 1);
+          }
+          return 1;
+        })));
+      await Promise.all(lockers.map((w) => w.run([mutex.buffer, data, 2000])));
+      await Promise.all(lockers.map((w) => w.terminate()));
+      assert("mutex keeps non-atomic RMW exact across 4 threads",
+        new Int32Array(data)[0] === 8000, String(new Int32Array(data)[0]));
+
+      const sig = new Signal();
+      const notifier = await Task.spawn((sab, delay) => {
+        const v = new Int32Array(sab);
+        const end = Date.now() + delay; while (Date.now() < end) {}
+        Atomics.store(v, 0, 1); Atomics.notify(v, 0);
+        return 1;
+      });
+      const running = notifier.run([sig.buffer, 100]);
+      const woke = await sig.waitAsync(3000);
+      await running;
+      await notifier.terminate();
+      assert("main thread waitAsync released by worker notify", woke === true);
+    } else {
+      skip("shared memory proofs", "SharedArrayBuffer unavailable — serve with COOP/COEP (npm run demo)");
+    }
+  } catch (err) {
+    assert("suite crashed", false, err?.stack ?? String(err));
+  }
+
+  const ok = fail === 0;
+  verdict.textContent = `${pass} passed, ${fail} failed — VERDICT: ${ok ? "PASS" : "FAIL"}`;
+  verdict.style.color = ok ? "#4ade80" : "#f87171";
+  window.__UNITHREAD_RESULT__ = { pass, fail, results, verdict: ok ? "PASS" : "FAIL" }; // read by test/browser.test.mjs
+}
+
+// The suite is not run on load: it would fight the live workload for CPU and
+// slow the page down before you have even seen it. It runs when you open the
+// panel, or when test/browser.test.mjs asks for it — with the workload stopped
+// either way, so it gets a clean machine.
+let proofsStarted = false;
+window.__runProofs = () => {
+  if (proofsStarted) return;
+  proofsStarted = true;
+  setMode("off");
+  return runProofs();
+};
+document.querySelector("details").addEventListener("toggle", (e) => {
+  if (e.target.open) window.__runProofs();
+});
+</script>
+</body>
+</html>

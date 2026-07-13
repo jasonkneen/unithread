@@ -1,0 +1,43 @@
+{
+  "name": "unithread",
+  "version": "0.2.0",
+  "description": "Isomorphic true-multithreading for JavaScript: one API over node:worker_threads and Web Workers. Function shipping, worker pools, RPC proxies, shared memory + Atomics.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && npm run bundle",
+    "bundle": "esbuild src/index.ts --bundle --format=esm --platform=neutral --external:node:* --outfile=dist/unithread.bundle.js && esbuild src/index.ts --bundle --minify --format=esm --platform=neutral --external:node:* --outfile=dist/unithread.bundle.min.js",
+    "test": "node test/proof.test.mjs",
+    "test:browser": "node test/browser.test.mjs",
+    "demo": "node demo/serve.mjs"
+  },
+  "sideEffects": false,
+  "keywords": [
+    "worker",
+    "threads",
+    "worker_threads",
+    "web-worker",
+    "multithreading",
+    "atomics",
+    "sharedarraybuffer",
+    "pool",
+    "isomorphic"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "esbuild": "^0.28.1",
+    "playwright": "^1.61.1",
+    "typescript": "^5.6.3"
+  }
+}

@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>unithread — browser proof</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #0c0d10; color: #e6e7eb;
+         font: 14px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  main { max-width: 720px; margin: 0 auto; padding: 48px 24px; }
+  h1 { font-size: 16px; font-weight: 600; letter-spacing: .02em; margin: 0 0 4px; }
+  .sub { color: #8b8e98; margin: 0 0 24px; }
+  #log div { padding: 3px 0; border-bottom: 1px solid #17181d; }
+  .pass::before { content: "PASS  "; color: #4ade80; }
+  .fail::before { content: "FAIL  "; color: #f87171; }
+  .info { color: #8b8e98; }
+  #verdict { margin-top: 20px; font-weight: 600; }
+  button { background: #17181d; color: #e6e7eb; border: 1px solid #2a2c33;
+           border-radius: 6px; padding: 8px 16px; font: inherit; cursor: pointer; }
+  button:hover { border-color: #4a4d57; }
+</style>
+</head>
+<body>
+<main>
+  <h1>unithread</h1>
+  <p class="sub">browser proof suite — Web Worker branch of the same protocol</p>
+  <button id="run">run proofs</button>
+  <div id="log"></div>
+  <div id="verdict"></div>
+</main>
+<script type="module">
+import {
+  Task, runInThread, WorkerPool, spawnRemote,
+  SharedCounter, hasSharedMemory, hardwareConcurrency, isNode,
+} from "./unithread.bundle.js";
+
+const log = document.getElementById("log");
+const verdict = document.getElementById("verdict");
+let pass = 0, fail = 0;
+const assert = (name, cond, detail = "") => {
+  const d = document.createElement("div");
+  d.className = cond ? "pass" : "fail";
+  d.textContent = name + (detail ? "  — " + detail : "");
+  log.appendChild(d);
+  cond ? pass++ : fail++;
+};
+const info = (t) => {
+  const d = document.createElement("div");
+  d.className = "info"; d.textContent = t; log.appendChild(d);
+};
+
+document.getElementById("run").onclick = async () => {
+  log.innerHTML = ""; verdict.textContent = ""; pass = fail = 0;
+  info(`isNode=${isNode} cores=${await hardwareConcurrency()} sharedMemory=${hasSharedMemory()}`);
+
+  // 1. real worker, off main thread
+  const env = await runInThread((e) => e);
+  assert("worker runtime is web, not main thread",
+    env.runtime === "web" && env.isMainThread === false, JSON.stringify(env));
+
+  // 2. main thread responsive during worker CPU burn
+  let ticks = 0;
+  const iv = setInterval(() => ticks++, 10);
+  await runInThread((ms) => { const end = Date.now() + ms; while (Date.now() < end) {} return 1; }, 400);
+  clearInterval(iv);
+  assert("UI thread responsive during 400ms worker burn", ticks >= 10, ticks + " ticks");
+
+  // 3. pool
+  const pool = await WorkerPool.create((n) => {
+    const fib = (x) => (x < 2 ? x : fib(x - 1) + fib(x - 2));
+    return fib(n);
+  }, 4);
+  const r = await pool.map([20, 22, 24, 26], (n) => [n]);
+  await pool.close();
+  assert("pool.map correct & ordered",
+    JSON.stringify(r) === JSON.stringify([6765, 17711, 46368, 121393]), JSON.stringify(r));
+
+  // 4. proxy + streaming
+  const svc = await spawnRemote({ pow: (a, b) => Math.pow(a, b) });
+  assert("proxy method", (await svc.pow(2, 10)) === 1024);
+  await svc.terminate();
+
+  const streamer = await Task.spawn((n, env) => {
+    for (let i = 1; i <= n; i++) env.emit("p", i);
+    return "done";
+  });
+  const events = [];
+  streamer.onEvent((_, d) => events.push(d));
+  await streamer.run([5]);
+  await streamer.terminate();
+  assert("streamed events in order", JSON.stringify(events) === "[1,2,3,4,5]", JSON.stringify(events));
+
+  // 5. transferable out
+  const buf = new ArrayBuffer(4096);
+  const t = await Task.spawn((b) => b.byteLength);
+  const seen = await t.run([buf], [buf]);
+  await t.terminate();
+  assert("buffer moved, not copied", seen === 4096 && buf.byteLength === 0,
+    `worker=${seen} source=${buf.byteLength}`);
+
+  // 6. shared memory (needs COOP/COEP — skipped gracefully otherwise)
+  if (hasSharedMemory()) {
+    const c = new SharedCounter(0);
+    const tasks = await Promise.all([1, 2, 3, 4].map(() =>
+      Task.spawn((sab, n) => { const v = new Int32Array(sab); for (let i = 0; i < n; i++) Atomics.add(v, 0, 1); return 1; })));
+    await Promise.all(tasks.map((x) => x.run([c.buffer, 25000])));
+    await Promise.all(tasks.map((x) => x.terminate()));
+    assert("atomic counter exact across 4 workers", c.value === 100000, String(c.value));
+  } else {
+    info("SharedArrayBuffer unavailable — serve with COOP/COEP headers to enable (see README)");
+  }
+
+  verdict.textContent = `${pass} passed, ${fail} failed — ${fail ? "FAIL" : "PASS"}`;
+  verdict.style.color = fail ? "#f87171" : "#4ade80";
+};
+</script>
+</body>
+</html>
