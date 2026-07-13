@@ -96,8 +96,65 @@ export async function measureBlocking(run) {
   };
 }
 
+/**
+ * Sample main-thread frame times in a real browser while `action` runs.
+ * Playwright is an optional dependency — absent, this reports and gives up.
+ * @param {string} url
+ * @param {{action?: string, seconds?: number}} opts
+ * @returns {Promise<{fps: number, worstFrameMs: number}>}
+ */
+export async function measureFrames(url, { action = "", seconds = 4 } = {}) {
+  let chromium;
+  try {
+    ({ chromium } = await import("playwright"));
+  } catch {
+    throw new Error(
+      "browser mode needs playwright: npm i -D playwright && npx playwright install chromium",
+    );
+  }
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  await page.goto(url);
+  if (action) await page.evaluate(action);
+
+  const result = await page.evaluate(async (ms) => {
+    // rAF-driven: a CSS animation would keep running on the compositor while the
+    // main thread is blocked, and would hide exactly the jank we are looking for.
+    const dts = [];
+    let last = performance.now();
+    let stop = false;
+    requestAnimationFrame(function loop(t) {
+      dts.push(t - last);
+      last = t;
+      if (!stop) requestAnimationFrame(loop);
+    });
+    await new Promise((r) => setTimeout(r, ms));
+    // Settle: after a stall Chromium dispatches the queued frame with a stale
+    // timestamp, and only the NEXT frame carries the real jump.
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    stop = true;
+    return dts;
+  }, seconds * 1000);
+
+  await browser.close();
+  const worstFrameMs = Math.round(Math.max(...result));
+  const fps = Math.round(result.length / seconds);
+  return { fps, worstFrameMs };
+}
+
 // CLI: node measure.mjs path/to/mod.mjs#exportName '[40]'
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  if (process.argv[2] === "--browser") {
+    const url = process.argv[3];
+    const actionIdx = process.argv.indexOf("--action");
+    const secondsIdx = process.argv.indexOf("--seconds");
+    const action = actionIdx > -1 ? process.argv[actionIdx + 1] : "";
+    const seconds = secondsIdx > -1 ? Number(process.argv[secondsIdx + 1]) : 4;
+    const r = await measureFrames(url, { action, seconds });
+    console.log(`fps            ${r.fps}`);
+    console.log(`worst frame    ${r.worstFrameMs} ms   ${r.worstFrameMs > 16.7 ? "<- dropped frames" : "(within budget)"}`);
+    process.exit(0);
+  }
   const [target, argsJson = "[]"] = process.argv.slice(2);
   if (!target) {
     console.error("usage: measure.mjs <file.mjs#exportName> [argsJson]");
