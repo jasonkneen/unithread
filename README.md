@@ -89,6 +89,17 @@ Everything except shared memory (spawn, pools, RPC proxies, transfers) works wit
 - Transferables both directions: pass a transfer list to `run`/`call`; return via `env.transfer(value, [buffers])`. Moved, not copied — source detaches.
 - Streaming: worker calls `env.emit(event, data)` mid-task; main thread subscribes with `task.onEvent(cb)`. Also on `globalThis.__unithread` inside service methods.
 
+## Agent skill
+
+`skill/` packages unithread as a Claude Code skill: an agent can audit a codebase for
+main-thread hogs, offload them to threads, and prove the main thread was freed.
+
+    ln -s "$PWD/skill" ~/.claude/skills/unithread
+
+Then ask an agent to "make this app stop janking". It will measure candidates, refuse to
+offload anything under ~16 ms, verify the shipped function captures nothing, and report a
+before/after — reverting if the number did not move.
+
 ## Build / test / demo
 ```
 npm install && npm run build   # tsc -> dist/, then esbuild -> dist/unithread.bundle[.min].js
