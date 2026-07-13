@@ -8,7 +8,7 @@ import { UnifiedWorker, Transferable_ } from "./worker.js";
  * Protocol (structured-clone-safe):
  *   in : { id, type: "call", args } | { id, type: "method", name, args }
  *   out: { id, ok: true, value }
- *      | { id, ok: false, error: { message, stack } }
+ *      | { id, ok: false, error: { message, stack, name } }
  *      | { type: "event", event, data }            (fire-and-forget stream)
  *
  * Worker-side helpers (available as the injected env AND as
@@ -57,7 +57,8 @@ export function _bootstrap(exportedSource: string): string {
       function (err) {
         post({ id: id, ok: false, error: {
           message: err && err.message ? err.message : String(err),
-          stack: err && err.stack ? err.stack : undefined
+          stack: err && err.stack ? err.stack : undefined,
+          name: err && err.name ? err.name : "Error"
         }});
       }
     );
@@ -166,6 +167,7 @@ export class Task<TArgs extends any[] = any[], TResult = any> {
     else {
       const e = new Error(msg.error?.message ?? "Worker error");
       if (msg.error?.stack) e.stack = msg.error.stack;
+      if (msg.error?.name) e.name = msg.error.name;
       p.reject(e);
     }
   }

@@ -95,7 +95,8 @@ function _bootstrap(exportedSource) {
       function (err) {
         post({ id: id, ok: false, error: {
           message: err && err.message ? err.message : String(err),
-          stack: err && err.stack ? err.stack : undefined
+          stack: err && err.stack ? err.stack : undefined,
+          name: err && err.name ? err.name : "Error"
         }});
       }
     );
@@ -168,6 +169,7 @@ var Task = class _Task {
     else {
       const e = new Error(msg.error?.message ?? "Worker error");
       if (msg.error?.stack) e.stack = msg.error.stack;
+      if (msg.error?.name) e.name = msg.error.name;
       p.reject(e);
     }
   }
