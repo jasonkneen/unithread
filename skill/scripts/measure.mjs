@@ -21,6 +21,19 @@
 //    samples — is invisible to both floors. This gate catches contention that
 //    is still present immediately before or immediately after the run; it
 //    cannot see a spike confined entirely inside the window between them.
+// 4. Browser mode (`measureFrames`) has its own version of hazard 1: the rAF
+//    sampler MUST be armed before the action fires, in the SAME page.evaluate
+//    call. `await page.evaluate(action)` followed by a separate
+//    `page.evaluate(sampler)` measures nothing — a synchronously-blocking
+//    action finishes blocking before a single frame is sampled, and gets
+//    reported as smooth. `browser.close()` also lives in a `finally` here:
+//    a throwing action (bad selector, bad page) must not leak the Chromium
+//    process, or the caller (and `node --test`) hangs.
+// 5. `fps` misreads in headless Chromium: it is not vsync-capped, so a smooth
+//    run can read ~120 fps instead of ~60. `worstFrameMs` (and the derived
+//    `jankFrames`/`jankPct`, frames over the 16.7ms/frame budget) are the
+//    numbers that actually gate jank; `fps` is kept for reference only and
+//    must not be read as "out of 60".
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 
@@ -99,9 +112,32 @@ export async function measureBlocking(run) {
 /**
  * Sample main-thread frame times in a real browser while `action` runs.
  * Playwright is an optional dependency — absent, this reports and gives up.
+ *
+ * Ordering is load-bearing: the rAF sampler is armed and the action is fired
+ * inside ONE `page.evaluate` call, sampler first. If those were two separate
+ * `evaluate` calls (sampler installed only after awaiting the action), a
+ * synchronously-blocking action would finish blocking before a single frame
+ * was sampled, and would be reported as smooth — the worst possible defect
+ * for a gate whose entire job is proving the main thread was freed.
+ *
+ * The action is fired but never awaited — this repo's demo workloads loop
+ * forever by design, so awaiting them would hang forever. A synchronous
+ * throw (e.g. a bad selector) is left to propagate, which fails the
+ * `page.evaluate` call and this function's returned promise (see the
+ * `finally`/`browser.close()` below); a later *async* rejection from a
+ * returned promise is swallowed so it doesn't surface as an unhandled
+ * rejection in the page.
+ *
+ * `browser.close()` runs in a `finally` so a bad URL, a throwing action, or a
+ * sampler failure never leaks the Chromium process — a leak would hang the
+ * caller (and hang `node --test` after the assertions already ran).
+ *
+ * `fps` is not a reliable jank signal here: headless Chromium is not
+ * vsync-capped, so a smooth run can read ~120 fps rather than ~60. Prefer
+ * `worstFrameMs` and `jankFrames`/`jankPct` (frames over the 16.7ms budget).
  * @param {string} url
  * @param {{action?: string, seconds?: number}} opts
- * @returns {Promise<{fps: number, worstFrameMs: number}>}
+ * @returns {Promise<{worstFrameMs: number, jankFrames: number, jankPct: number, totalFrames: number, fps: number}>}
  */
 export async function measureFrames(url, { action = "", seconds = 4 } = {}) {
   let chromium;
@@ -113,33 +149,52 @@ export async function measureFrames(url, { action = "", seconds = 4 } = {}) {
     );
   }
   const browser = await chromium.launch();
-  const page = await browser.newPage();
-  await page.goto(url);
-  if (action) await page.evaluate(action);
+  try {
+    const page = await browser.newPage();
+    await page.goto(url);
 
-  const result = await page.evaluate(async (ms) => {
-    // rAF-driven: a CSS animation would keep running on the compositor while the
-    // main thread is blocked, and would hide exactly the jank we are looking for.
-    const dts = [];
-    let last = performance.now();
-    let stop = false;
-    requestAnimationFrame(function loop(t) {
-      dts.push(t - last);
-      last = t;
-      if (!stop) requestAnimationFrame(loop);
-    });
-    await new Promise((r) => setTimeout(r, ms));
-    // Settle: after a stall Chromium dispatches the queued frame with a stale
-    // timestamp, and only the NEXT frame carries the real jump.
-    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-    stop = true;
-    return dts;
-  }, seconds * 1000);
+    const dts = await page.evaluate(async ({ action, ms }) => {
+      // rAF-driven: a CSS animation would keep running on the compositor while the
+      // main thread is blocked, and would hide exactly the jank we are looking for.
+      // Armed BEFORE the action fires — see the ordering note above.
+      const dts = [];
+      let last = performance.now();
+      let stop = false;
+      requestAnimationFrame(function loop(t) {
+        dts.push(t - last);
+        last = t;
+        if (!stop) requestAnimationFrame(loop);
+      });
 
-  await browser.close();
-  const worstFrameMs = Math.round(Math.max(...result));
-  const fps = Math.round(result.length / seconds);
-  return { fps, worstFrameMs };
+      // Fire, don't await. A synchronous throw (bad selector) is left
+      // uncaught here on purpose, so it propagates out of this evaluate()
+      // and fails the measurement loudly. A returned promise that rejects
+      // later (async workload) is caught so it doesn't become an unhandled
+      // rejection in the page — it is still never awaited.
+      if (action) {
+        const maybePromise = new Function(action)();
+        if (maybePromise && typeof maybePromise.then === "function") {
+          maybePromise.catch(() => {});
+        }
+      }
+
+      await new Promise((r) => setTimeout(r, ms));
+      // Settle: after a stall Chromium dispatches the queued frame with a stale
+      // timestamp, and only the NEXT frame carries the real jump.
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      stop = true;
+      return dts;
+    }, { action, ms: seconds * 1000 });
+
+    const totalFrames = dts.length;
+    const worstFrameMs = totalFrames ? Math.round(Math.max(...dts)) : 0;
+    const jankFrames = dts.filter((d) => d > 16.7).length;
+    const jankPct = totalFrames ? Math.round((jankFrames / totalFrames) * 1000) / 10 : 0;
+    const fps = Math.round(totalFrames / seconds);
+    return { worstFrameMs, jankFrames, jankPct, totalFrames, fps };
+  } finally {
+    await browser.close();
+  }
 }
 
 // CLI: node measure.mjs path/to/mod.mjs#exportName '[40]'
@@ -151,8 +206,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     const action = actionIdx > -1 ? process.argv[actionIdx + 1] : "";
     const seconds = secondsIdx > -1 ? Number(process.argv[secondsIdx + 1]) : 4;
     const r = await measureFrames(url, { action, seconds });
-    console.log(`fps            ${r.fps}`);
     console.log(`worst frame    ${r.worstFrameMs} ms   ${r.worstFrameMs > 16.7 ? "<- dropped frames" : "(within budget)"}`);
+    console.log(`jank frames    ${r.jankFrames}/${r.totalFrames} (${r.jankPct}%)   frames over the 16.7ms budget`);
+    console.log(`fps            ${r.fps}   (uncapped in headless Chromium — not vsync-limited, don't compare to 60)`);
     process.exit(0);
   }
   const [target, argsJson = "[]"] = process.argv.slice(2);
