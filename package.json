@@ -15,10 +15,12 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && npm run bundle",
+    "build": "tsc -p tsconfig.json && npm run bundle && npm run skill:sync",
     "bundle": "esbuild src/index.ts --bundle --format=esm --platform=neutral --external:node:* --outfile=dist/unithread.bundle.js && esbuild src/index.ts --bundle --minify --format=esm --platform=neutral --external:node:* --outfile=dist/unithread.bundle.min.js",
+    "skill:sync": "node scripts/sync-skill-asset.mjs",
     "test": "node test/proof.test.mjs",
     "test:browser": "node test/browser.test.mjs",
+    "test:skill": "node --test skill/test/*.test.mjs",
     "demo": "node demo/serve.mjs"
   },
   "sideEffects": false,

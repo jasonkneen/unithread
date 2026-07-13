@@ -46,7 +46,11 @@ await runInThread((buf) => {
 - **Shipped functions must be self-contained.** They cross the thread boundary via `Function.prototype.toString()` — no closure captures, no imports from outer scope. Pass data as arguments; use `SharedArrayBuffer` for shared state.
 - **Browser `SharedArrayBuffer` requires cross-origin isolation** (COOP/COEP headers). `Atomics.wait` is forbidden on the browser main thread — use `lockAsync()` / `waitAsync()` there. Node has no such restriction.
 - **Everything non-shared is copied** (structured clone). Pass `ArrayBuffer`s in the `transfer` list to move instead of copy.
-- Last arg injected into shipped functions is a `WorkerEnv` (`{ isMainThread, threadId, runtime }`).
+- Every function shipped via `runInThread`, `Task.spawn`, or `WorkerPool.create` receives one
+  extra trailing argument: a `WorkerEnv` (`{ isMainThread, threadId, runtime, emit, transfer }`).
+  **`Task.spawnService` methods are the one exception** — they're invoked as plain methods
+  (`task.call(name, args)`) with no env appended, so reach for `globalThis.__unithread` inside a
+  service method instead.
 
 ## Drop-in usage
 
@@ -88,6 +92,17 @@ Everything except shared memory (spawn, pools, RPC proxies, transfers) works wit
 - `spawnRemote(methods)` / `wrap(task)` — Comlink-style proxy: `await svc.pow(2, 10)`.
 - Transferables both directions: pass a transfer list to `run`/`call`; return via `env.transfer(value, [buffers])`. Moved, not copied — source detaches.
 - Streaming: worker calls `env.emit(event, data)` mid-task; main thread subscribes with `task.onEvent(cb)`. Also on `globalThis.__unithread` inside service methods.
+
+## Agent skill
+
+`skill/` packages unithread as a Claude Code skill: an agent can audit a codebase for
+main-thread hogs, offload them to threads, and prove the main thread was freed.
+
+    ln -s "$PWD/skill" ~/.claude/skills/unithread
+
+Then ask an agent to "make this app stop janking". It will measure candidates, refuse to
+offload anything under ~16 ms, verify the shipped function captures nothing, and report a
+before/after — reverting if the number did not move.
 
 ## Build / test / demo
 ```

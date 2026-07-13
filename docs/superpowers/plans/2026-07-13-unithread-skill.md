@@ -96,7 +96,7 @@ In `package.json`, replace the `scripts` block with:
     "skill:sync": "node scripts/sync-skill-asset.mjs",
     "test": "node test/proof.test.mjs",
     "test:browser": "node test/browser.test.mjs",
-    "test:skill": "node --test skill/test/",
+    "test:skill": "node --test skill/test/*.test.mjs",
     "demo": "node demo/serve.mjs"
   },
 ```
