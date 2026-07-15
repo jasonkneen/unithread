@@ -148,6 +148,11 @@ await pool.close();
 
 Parallel map, pool-bounded concurrency, **order preserved** in the returned array.
 
+All items are enqueued immediately — `map` allocates a promise for every item upfront before the
+pool processes the first one. This is fine for typical array sizes (hundreds to low thousands).
+For very large arrays (100k+ items) it creates a large queue and promise chain in memory before
+any work starts; chunk the input manually if that matters.
+
 ```js
 const pool = await WorkerPool.create((n) => n * 2, 2);
 const results = await pool.map([1, 2, 3], (n) => [n]); // [2, 4, 6]

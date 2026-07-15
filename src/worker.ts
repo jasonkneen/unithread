@@ -24,12 +24,16 @@ export class UnifiedWorker {
     const url = URL.createObjectURL(
       new Blob([source], { type: "text/javascript" }),
     );
-    return new UnifiedWorker(new (globalThis as any).Worker(url), "web", url);
+    try {
+      return new UnifiedWorker(new (globalThis as any).Worker(url), "web", url);
+    } catch (err) {
+      URL.revokeObjectURL(url);
+      throw err;
+    }
   }
 
   postMessage(data: any, transfer: Transferable_[] = []): void {
-    if (this.kind === "node") this.impl.postMessage(data, transfer);
-    else this.impl.postMessage(data, transfer);
+    this.impl.postMessage(data, transfer);
   }
 
   onMessage(cb: MessageHandler): void {

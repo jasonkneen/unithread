@@ -117,6 +117,8 @@ The result carries a `reason`:
 - `threw` — the candidate raised its own error (not a leaked identifier); that's the candidate's
   business, not a boundary problem.
 
+- A function that branches on `env.runtime` (e.g. `(n, env) => env.runtime === "node" ? n * 2 : n`) will also report `diverged`: the main-thread stub uses `runtime: "main"` (deliberately, so a function that decides based on which side it's on makes a real, observable choice) which is neither `"node"` nor `"web"`. This is a false alarm if the branch is intentional and portable — use `--no-compare` for these.
+
 Fails with `captured` or `diverged` → fix the identified capture, pass it as an argument, re-run.
 Fails with `vacuous` → the gate could not verify anything either way; make the function return a
 checkable value, or accept the risk explicitly with `--no-compare`.

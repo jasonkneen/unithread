@@ -30,11 +30,15 @@ var UnifiedWorker = class _UnifiedWorker {
     const url = URL.createObjectURL(
       new Blob([source], { type: "text/javascript" })
     );
-    return new _UnifiedWorker(new globalThis.Worker(url), "web", url);
+    try {
+      return new _UnifiedWorker(new globalThis.Worker(url), "web", url);
+    } catch (err) {
+      URL.revokeObjectURL(url);
+      throw err;
+    }
   }
   postMessage(data, transfer = []) {
-    if (this.kind === "node") this.impl.postMessage(data, transfer);
-    else this.impl.postMessage(data, transfer);
+    this.impl.postMessage(data, transfer);
   }
   onMessage(cb) {
     if (this.kind === "node") this.impl.on("message", cb);

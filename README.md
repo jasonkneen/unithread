@@ -56,7 +56,7 @@ await runInThread((buf) => {
 
 **Node / bundlers** — `npm install`, then `import { ... } from "unithread"`.
 
-**Browser, zero build step** — copy `dist/unithread.bundle.min.js` (8 kB) next to your page:
+**Browser, zero build step** — copy `dist/unithread.bundle.min.js` (8.5 kB) next to your page:
 ```html
 <script type="module">
   import { runInThread, WorkerPool, spawnRemote } from "./unithread.bundle.min.js";
@@ -84,8 +84,8 @@ Everything except shared memory (spawn, pools, RPC proxies, transfers) works wit
 
 
 ## Drop-in options
-1. **npm tarball**: `npm i ./unithread-0.2.0.tgz` — full package with types.
-2. **Single file**: copy `dist/unithread.bundle.js` (13 kB, zero deps) or `.min.js` (8 kB) into your project; `import { ... } from "./unithread.bundle.js"` works in Node and browsers unchanged.
+1. **npm tarball**: `npm i ./unithread-0.2.0` — full package with types.
+2. **Single file**: copy `dist/unithread.bundle.js` (13 kB, zero deps) or `.min.js` (8.5 kB) into your project; `import { ... } from "./unithread.bundle.js"` works in Node and browsers unchanged.
 3. **Browser check**: `npm run demo` → <http://localhost:8080>. Serves with COOP/COEP already set, so the `SharedArrayBuffer` proofs run rather than skip.
 
 ## v0.2 additions
@@ -109,6 +109,7 @@ before/after — reverting if the number did not move.
 npm install && npm run build   # tsc -> dist/, then esbuild -> dist/unithread.bundle[.min].js
 npm test                       # node suite      — 21/21
 npm run test:browser           # chromium suite  — 11/11 (needs: npx playwright install chromium)
+npm run test:skill             # skill suite     — 28/28 (portability + measurement gates)
 npm run demo                   # http://localhost:8080, served with COOP/COEP
 ```
 
