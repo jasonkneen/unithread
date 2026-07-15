@@ -21,7 +21,8 @@
     "test": "node test/proof.test.mjs",
     "test:browser": "node test/browser.test.mjs",
     "test:skill": "node --test skill/test/*.test.mjs",
-    "demo": "node demo/serve.mjs"
+    "demo": "node demo/serve.mjs",
+    "prepublishOnly": "npm run build && npm test"
   },
   "sideEffects": false,
   "keywords": [
@@ -36,6 +37,22 @@
     "isomorphic"
   ],
   "license": "MIT",
+  "author": "Jason Kneen",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jasonkneen/unithread.git"
+  },
+  "homepage": "https://github.com/jasonkneen/unithread#readme",
+  "bugs": {
+    "url": "https://github.com/jasonkneen/unithread/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "devDependencies": {
     "@types/node": "^26.1.1",
     "esbuild": "^0.28.1",
