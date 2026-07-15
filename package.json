@@ -1,6 +1,6 @@
 {
   "name": "@jasonkneen/unithread",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Isomorphic true-multithreading for JavaScript: one API over node:worker_threads and Web Workers. Function shipping, worker pools, RPC proxies, shared memory + Atomics.",
   "type": "module",
   "main": "./dist/index.js",
