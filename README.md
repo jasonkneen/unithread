@@ -3,7 +3,7 @@
 True multithreading for JavaScript with **one API across Node and the browser**. Wraps `node:worker_threads` and Web Workers behind a single surface: function shipping, worker pools, RPC services, and shared memory via `SharedArrayBuffer` + `Atomics`.
 
 ```js
-import { runInThread, Task, WorkerPool, SharedCounter, Mutex, Signal } from "unithread";
+import { runInThread, Task, WorkerPool, SharedCounter, Mutex, Signal } from "@jasonkneen/unithread";
 
 // One-shot: run a function on a real OS thread
 const n = await runInThread((x) => {
@@ -54,7 +54,7 @@ await runInThread((buf) => {
 
 ## Drop-in usage
 
-**Node / bundlers** — `npm install`, then `import { ... } from "unithread"`.
+**Node / bundlers** — `npm install @jasonkneen/unithread`, then `import { ... } from "@jasonkneen/unithread"`.
 
 **Browser, zero build step** — copy `dist/unithread.bundle.min.js` (8.5 kB) next to your page:
 ```html
